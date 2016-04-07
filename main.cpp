@@ -1,6 +1,3 @@
-#include <openssl/md5.h>
-#include <openssl/sha.h>
-#include <openssl/des.h>
 #include <iostream>
 #include <fstream>
 #include <cstdint>
@@ -10,7 +7,8 @@
 #include <exception>
 #include <iomanip>
 #include <thread>
-#define DES_CBLOCK_LEN 8
+#include <condition_variable>
+
 using namespace std;
 
 #include "CryptoStuff.h"
@@ -26,39 +24,44 @@ vector<uint8_t> readFile(const string& fileName) {
 	return result;
 }
 
-
-class ThreadWorker {
+class ThreadWorker : public Base {
 	bool mStop;
-	std::unique_ptr<thread> mThread;
+	thread mThread;
 protected:
-	bool isStop() {
-		return mStop;
-	}
+	shared_ptr<mutex> mLock;
+	shared_ptr<condition_variable> mCondition;
+
 	virtual void doRun() {
 		while (!isStop())
 			cout << "hello\n";
 	}
+
 	virtual void notify() {
-		return;
+		unique_lock<mutex> lock(*mLock);
+		mCondition->notify_all();
 	}
+
 	void run() {
+		{
+			unique_lock<mutex> lock(*mLock);
+		}
 		doRun();
+		mStop = true;
 		notify();
 	}
 public:
+	ThreadWorker(const shared_ptr<mutex>& lock, shared_ptr<condition_variable>& condition)
+		: mStop(false), mLock(lock), mCondition(condition), mThread(&ThreadWorker::run, this)
+	{}
+
+	bool isStop() {
+		return mStop;
+	}
+
 	void stop() {
 		mStop = true;
 
-		if (mThread)
-			mThread->join();
-
-		mThread.reset();
-	}
-
-	void start() {
-		mStop = false;
-		if (!mThread)
-			mThread = make_unique<thread>(&ThreadWorker::run, this);
+		mThread.join();
 	}
 };
 
@@ -70,7 +73,7 @@ class PasswordBruter : public ThreadWorker {
 	const size_t mStartAlphabetIndex;
 	const size_t mStopAlphabetIndex;
 
-	bool mSucceed;
+	atomic<bool> mSucceed;
 	vector<uint8_t> mPassword;
 
 	struct Result
@@ -80,7 +83,12 @@ class PasswordBruter : public ThreadWorker {
 	};
 
 	void brute(const vector<uint8_t>& prefix) {
-		cout << string(prefix.begin(), prefix.end()) << '\n';
+#ifdef DEBUG
+		{
+			unique_lock<mutex> lock(*mLock);
+			cout << string(prefix.begin(), prefix.end()) << '\n';
+		}
+#endif  // DEBUG
 
 		if (prefix.size() > mMaxLen)
 			return;
@@ -94,7 +102,7 @@ class PasswordBruter : public ThreadWorker {
 		std::copy(prefix.begin(), prefix.end(), password.begin());
 		for (uint8_t c : mAlphabet)
 		{
-			password[prefix.size() - 1] = c;
+			password[prefix.size()] = c;
 
 			if (password.size() >= mMinLen && mVerifier->verify(password))
 			{
@@ -125,30 +133,75 @@ protected:
 	}
 
 public:
-	PasswordBruter(const shared_ptr<PasswordVerifier>& v, const string& prefix,
-	               vector<uint8_t>& alphabet, size_t minLength, size_t maxLength)
-		: mVerifier(v), mAlphabet(alphabet),
+	PasswordBruter(const shared_ptr<mutex>& lock, shared_ptr<condition_variable>& condition,
+	               const shared_ptr<PasswordVerifier>& v, const string& prefix,
+	               const vector<uint8_t>& alphabet, size_t minLength, size_t maxLength,
+	               size_t startIndex, size_t stopIndex)
+		: ThreadWorker(lock, condition), mVerifier(v), mAlphabet(alphabet),
 		mMinLen(minLength), mMaxLen(maxLength), mSucceed(false),
-		mStartAlphabetIndex(0), mStopAlphabetIndex(2)
-	{
+		mStartAlphabetIndex(startIndex), mStopAlphabetIndex(stopIndex)
+	{}
 
+	bool succeed() const {
+		return mSucceed;
 	}
 
-
+	const vector<uint8_t>& password() const {
+		return mPassword;
+	}
 };
 
-// template <typename Verifier, size_t maxLen>
-// template<>
-// bool PasswordBruter<Verifier, maxLen>::brute<maxLen+1>(const vector<uint8_t>& prefix, uint8_t start, uint8_t end)
-// {
-//  return false;
-// }
+vector<uint8_t> runBrute(const shared_ptr<PasswordVerifier>& verifier, const vector<uint8_t>& alphabet,
+                         size_t minLength, size_t maxLength) {
+	const uint32_t threadNum = thread::hardware_concurrency();
+	const uint32_t alphabetRange = alphabet.size() / threadNum;
 
+
+	vector<shared_ptr<PasswordBruter> > bruters;
+	auto hasPassword = [](const shared_ptr<PasswordBruter>& p) -> bool {
+						   return p->succeed();
+					   };
+	auto isReady = [](const shared_ptr<PasswordBruter>& p) -> bool {
+					   return p->isStop();
+				   };
+	{
+		auto lock = make_shared<mutex>();
+		auto condition = make_shared<condition_variable>();
+		unique_lock<mutex> l(*lock);
+
+		for (uint32_t i = 0; i < threadNum; ++i)
+		{
+			auto startIndex = i * threadNum;
+			auto stopIndex = (i == threadNum - 1) ? (i + 1) * threadNum : alphabet.size();
+			auto bruter = make_shared<PasswordBruter>(lock, condition, verifier, "", alphabet,
+			                                          minLength, maxLength, startIndex, stopIndex);
+			bruters.push_back(bruter);
+		}
+
+		while (count_if(bruters.begin(), bruters.end(), hasPassword) == 0 &&
+		       count_if(bruters.begin(), bruters.end(), isReady) != bruters.size())
+		{
+			condition->wait(l);
+		}
+	}
+
+	for (auto& bruter: bruters)
+	{
+		bruter->stop();
+	}
+
+	auto luckyBruter = find_if(bruters.begin(), bruters.end(), hasPassword);
+	if (luckyBruter != bruters.end())
+		return (*luckyBruter)->password();
+
+	throw runtime_error("Password not found");
+}
 
 int main(int argc, char* argv[]) {
 	// TODO: control args
 	auto result = readFile("test.txt");
 	string password = "abcde";
+	vector<uint8_t> pass(password.begin(), password.end());
 	// auto md5 = genMd5Key(vector<uint8_t>(password.begin(), password.end()));
 
 	// for (auto a: md5)
@@ -164,41 +217,67 @@ int main(int argc, char* argv[]) {
 
 
 	auto enc = readFile("test.bin");
-	std::array<uint8_t, DES_CBLOCK_LEN> iv;//, out(DES_CBLOCK_LEN);
-	std::copy(enc.begin(), enc.begin() + DES_CBLOCK_LEN, iv.begin());
+	//std::array<uint8_t, DES_CBLOCK_LEN> iv;//, out(DES_CBLOCK_LEN);
+	//std::copy(enc.begin(), enc.begin() + DES_CBLOCK_LEN, iv.begin());
 
 	//std::vector<uint8_t> ct(enc.size() - DES_CBLOCK_LEN);
 	//std::copy(enc.begin() + DES_CBLOCK_LEN, enc.end() - SHA256_CBLOCK, ct.begin());
 
 	auto ct = readFile("testmy.bin");
+	std::array<uint8_t, DES_CBLOCK_LEN> iv;//, out(DES_CBLOCK_LEN);
+	std::copy(enc.begin(), enc.begin() + DES_CBLOCK_LEN, iv.begin());
 	//auto r = decryptDesEde(ct, iv, md5);
+	PasswordBasedDecryptorImpl<Des2KeyEde> p(Des2KeyEde(), std::make_shared<DigestKeyGenerator<Md5> >(Md5()), ct, iv);
+	auto r = p.decrypt(pass);
+	cout << string(r.begin(), r.begin() + result.size()) << endl;
+	auto dgst = Sha256().digest(r);
+	cout << hex << (int)dgst[0];
+	//return 0;
 	auto d = make_shared<PasswordBasedDecryptorImpl<Des2KeyEde> >(Des2KeyEde(),
 	                                                              std::make_shared<DigestKeyGenerator<Md5> >(Md5()), ct, iv);
+
 	//auto r = d.decrypt(std::vector<uint8_t>(password.begin(), password.end()));
 	//cout << string(r.begin(), r.begin() + result.size()) << endl;
 
-	ThreadWorker t;
-	t.start();
-	std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	t.stop();
+	// ThreadWorker t;
+	// t.start();
+	// std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	// t.stop();
 
-	vector<uint8_t> alphabet = {'a', 'b', 'c'};
+	//vector<uint8_t> alphabet = {'a', 'b', 'c'};
 
-	array<uint8_t, Sha256::length> a = {0};
+	array<uint8_t, Sha256::length> a = {0x9d, 0x79, 0x25, 0xbf, 0x63, 0x64, 0x31, 0xf6, 0xca, 0x2b, 0x46, 0xf9, 0xba, 0xd3, 0x3d, 0x67, 0x4d, 0x90, 0x03, 0xc6, 0xec, 0xf6, 0x8e, 0x82, 0xc8, 0x46, 0xec, 0x08, 0x07, 0xe0, 0x49, 0xea};
+
+
 	auto tmp = make_shared<DigestBasedVerifier<Sha256> >(a, d, Sha256());
-	PasswordBruter p(tmp, "", alphabet, 0, 3);
-	p.start();
+	// PasswordBruter p(tmp, "", alphabet, 0, 3);
+	// p.start();
+	cout << tmp->verify(pass);
+	//return 0;
 
 
-	vector<uint8_t> alphabet1 = {'d', 'e', 'f'};
+	vector<uint8_t> alphabet1 = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', };
 
-	array<uint8_t, Sha256::length> b = {0};
-	auto tmp1 = make_shared<DigestBasedVerifier<Sha256> >(b, d, Sha256());
-	PasswordBruter p1(tmp1, "", alphabet1, 0, 10);
-	p1.start();
-	std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	p.stop();
-	p1.stop();
+	//array<uint8_t, Sha256::length> b = {0};
+	auto tmp1 = make_shared<DigestBasedVerifier<Sha256> >(a, d, Sha256());
+
+	try {
+		auto pwd = runBrute(tmp1, alphabet1, 0, 5);
+		cout << string(pwd.begin(), pwd.end());
+	} catch (const runtime_error& e) {
+		cout << e.what();
+	}
+	return 0;
+
+
+
+
+
+	// PasswordBruter p1(tmp1, "", alphabet1, 0, 10);
+	// p1.start();
+	// std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	// p.stop();
+	// p1.stop();
 	// //auto digester = Digest<S>
 
 	// DigestBasedVerifier<Sha256, DesDecryptor<DigestKeyGenerator<Md5>>> tmp(a, d, Sha256());
