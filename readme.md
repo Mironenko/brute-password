@@ -1,0 +1,1 @@
+OSX build: clang main.cpp -lc++ -I/usr/local/include/ -std=c++1y -lcrypto
