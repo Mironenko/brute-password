@@ -25,16 +25,13 @@ vector<uint8_t> readFile(const string& fileName) {
 }
 
 class ThreadWorker : public Base {
-	bool mStop;
+	atomic<bool> mStop;
 	thread mThread;
 protected:
 	shared_ptr<mutex> mLock;
 	shared_ptr<condition_variable> mCondition;
 
-	virtual void doRun() {
-		while (!isStop())
-			cout << "hello\n";
-	}
+	virtual void doRun() = 0;
 
 	virtual void notify() {
 		unique_lock<mutex> lock(*mLock);
@@ -120,8 +117,9 @@ protected:
 	void doRun() {
 		try {
 			vector<uint8_t> password(1);
-			for (uint8_t c : mAlphabet)
+			for (size_t i = mStartAlphabetIndex; i != mStopAlphabetIndex; ++i)
 			{
+				auto c = mAlphabet[i];
 				password[0] = c;
 
 				brute(password);
@@ -168,11 +166,11 @@ vector<uint8_t> runBrute(const shared_ptr<PasswordVerifier>& verifier, const vec
 		auto lock = make_shared<mutex>();
 		auto condition = make_shared<condition_variable>();
 		unique_lock<mutex> l(*lock);
-
+		auto perThreadRange = alphabet.size() / threadNum;
 		for (uint32_t i = 0; i < threadNum; ++i)
 		{
-			auto startIndex = i * threadNum;
-			auto stopIndex = (i == threadNum - 1) ? (i + 1) * threadNum : alphabet.size();
+			auto startIndex = i * perThreadRange;
+			auto stopIndex = (i != threadNum - 1) ? (i + 1) * perThreadRange : alphabet.size();
 			auto bruter = make_shared<PasswordBruter>(lock, condition, verifier, "", alphabet,
 			                                          minLength, maxLength, startIndex, stopIndex);
 			bruters.push_back(bruter);
