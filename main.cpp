@@ -1,6 +1,6 @@
 #include <iostream>
 #include <fstream>
-#include <cstdint>
+
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <thread>
 #include <condition_variable>
+#include <sstream>
 
 using namespace std;
 
@@ -21,6 +22,29 @@ vector<uint8_t> readFile(const string& fileName) {
 	for (f.read(bufferStart, buffer.size()); f.gcount() > 0; f.read(bufferStart, buffer.size()))
 		std::copy(buffer.begin(), buffer.begin() + f.gcount(), back_inserter(result));
 
+	return result;
+}
+
+using DesBlockArray = std::array<uint8_t, Des2KeyEde::blockSize>;
+using Sha256Array = std::array<uint8_t, Sha256::length>;
+using BruteInputStruct = tuple<DesBlockArray, vector<uint8_t>, Sha256Array>;
+
+BruteInputStruct splitEncryptedData(const vector<uint8_t>& file) {
+	DesBlockArray iv;
+	std::copy(file.begin(), file.begin() + tuple_size<DesBlockArray>::value, iv.begin());
+	auto ct = vector<uint8_t>(file.begin() + tuple_size<DesBlockArray>::value,
+	                          file.end() - tuple_size<Sha256Array>::value);
+	Sha256Array checkSum;
+	copy(file.end() - tuple_size<Sha256Array>::value, file.end(), checkSum.begin());
+
+	return make_tuple(iv, ct, checkSum);
+}
+
+uint32_t strToInt(string s) {
+	stringstream ss;
+	ss << s;
+	uint32_t result;
+	ss >> result;
 	return result;
 }
 
@@ -196,147 +220,42 @@ vector<uint8_t> runBrute(const shared_ptr<PasswordVerifier>& verifier, const vec
 }
 
 int main(int argc, char* argv[]) {
-	// TODO: control args
-	auto result = readFile("test.txt");
-	string password = "abcde";
-	vector<uint8_t> pass(password.begin(), password.end());
-	// auto md5 = genMd5Key(vector<uint8_t>(password.begin(), password.end()));
-
-	// for (auto a: md5)
-	//  cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-	// DES_cblock k1, k2;
-	// std::copy(md5.begin(), md5.begin() + sizeof(k1), k1);
-	// std::copy(md5.begin() + sizeof(k1), md5.end(), k2);
-
-	// DES_key_schedule ks1, ks2;
-	// DES_set_key_unchecked(&k1, &ks1);
-	// DES_set_key_unchecked(&k2, &ks2);
-
-
-	auto enc = readFile("test.bin");
-	//std::array<uint8_t, DES_CBLOCK_LEN> iv;//, out(DES_CBLOCK_LEN);
-	//std::copy(enc.begin(), enc.begin() + DES_CBLOCK_LEN, iv.begin());
-
-	//std::vector<uint8_t> ct(enc.size() - DES_CBLOCK_LEN);
-	//std::copy(enc.begin() + DES_CBLOCK_LEN, enc.end() - SHA256_CBLOCK, ct.begin());
-
-	auto ct = readFile("testmy.bin");
-	std::array<uint8_t, DES_CBLOCK_LEN> iv;//, out(DES_CBLOCK_LEN);
-	std::copy(enc.begin(), enc.begin() + DES_CBLOCK_LEN, iv.begin());
-	//auto r = decryptDesEde(ct, iv, md5);
-	PasswordBasedDecryptorImpl<Des2KeyEde> p(Des2KeyEde(), std::make_shared<DigestKeyGenerator<Md5> >(Md5()), ct, iv);
-	auto r = p.decrypt(pass);
-	cout << string(r.begin(), r.begin() + result.size()) << endl;
-	auto dgst = Sha256().digest(r);
-	cout << hex << (int)dgst[0];
-	//return 0;
-	auto d = make_shared<PasswordBasedDecryptorImpl<Des2KeyEde> >(Des2KeyEde(),
-	                                                              std::make_shared<DigestKeyGenerator<Md5> >(Md5()), ct, iv);
-
-	//auto r = d.decrypt(std::vector<uint8_t>(password.begin(), password.end()));
-	//cout << string(r.begin(), r.begin() + result.size()) << endl;
-
-	// ThreadWorker t;
-	// t.start();
-	// std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	// t.stop();
-
-	//vector<uint8_t> alphabet = {'a', 'b', 'c'};
-
-	array<uint8_t, Sha256::length> a = {0x9d, 0x79, 0x25, 0xbf, 0x63, 0x64, 0x31, 0xf6, 0xca, 0x2b, 0x46, 0xf9, 0xba, 0xd3, 0x3d, 0x67, 0x4d, 0x90, 0x03, 0xc6, 0xec, 0xf6, 0x8e, 0x82, 0xc8, 0x46, 0xec, 0x08, 0x07, 0xe0, 0x49, 0xea};
-
-
-	auto tmp = make_shared<DigestBasedVerifier<Sha256> >(a, d, Sha256());
-	// PasswordBruter p(tmp, "", alphabet, 0, 3);
-	// p.start();
-	cout << tmp->verify(pass);
-	//return 0;
-
-
-	vector<uint8_t> alphabet1 = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', };
-
-	//array<uint8_t, Sha256::length> b = {0};
-	auto tmp1 = make_shared<DigestBasedVerifier<Sha256> >(a, d, Sha256());
+	if (argc < 4)
+	{
+		cout << "Usage: " << argv[0] << " file minPasswdLen maxPasswdLen [alphabet]\n";
+		exit(-1);
+	}
 
 	try {
-		auto pwd = runBrute(tmp1, alphabet1, 0, 5);
+		using Decryptor = PasswordBasedDecryptorImpl<Des2KeyEde>;
+
+		auto file = readFile(argv[1]);
+		auto minPasswdLen = strToInt(argv[2]);
+		auto maxPasswdLen = strToInt(argv[3]);
+
+		string alphabetStr = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		if (argc == 5)
+			alphabetStr = argv[4];
+		vector<uint8_t> alphabet(alphabetStr.begin(), alphabetStr.end());
+
+		auto bruteInput = splitEncryptedData(file);
+		auto ct = get<1>(bruteInput);
+		auto iv = get<0>(bruteInput);
+		auto checkSum = get<2>(bruteInput);
+
+		auto keyGenerator = std::make_shared<DigestKeyGenerator<Md5> >(Md5());
+		Des2KeyEde algo;
+
+		auto decryptor = make_shared<Decryptor>(algo, keyGenerator, ct, iv);
+		Sha256 hashAlgo;
+		auto verifier = make_shared<DigestBasedVerifier<Sha256> >(checkSum, decryptor, hashAlgo);
+
+		auto pwd = runBrute(verifier, alphabet, minPasswdLen, maxPasswdLen);
 		cout << string(pwd.begin(), pwd.end());
-	} catch (const runtime_error& e) {
-		cout << e.what();
+	} catch (const std::exception& e) {
+		cout << e.what() << '\n';
+		return -1;
 	}
-	return 0;
-
-
-
-
-
-	// PasswordBruter p1(tmp1, "", alphabet1, 0, 10);
-	// p1.start();
-	// std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	// p.stop();
-	// p1.stop();
-	// //auto digester = Digest<S>
-
-	// DigestBasedVerifier<Sha256, DesDecryptor<DigestKeyGenerator<Md5>>> tmp(a, d, Sha256());
-
-	// auto vpassword = std::vector<uint8_t>(password.begin(), password.end());
-	// cout << tmp.verify(vpassword);
-
-	// // cout << "IV\n";
-	// // for (auto a: iv)
-	// //   cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-	// cout << "data\n";
-	// cout << string(result.begin(), result.end());
-	// for (auto a: result)
-	//  cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-	// vector<uint8_t> alphabet = {'a','b','c'};
-	// PasswordBruter<decltype(tmp), 3> p(tmp, "", alphabet, 0, 3);
-	// p.start();
-
-	// // DES_ecb3_encrypt(reinterpret_cast<DES_cblock*>(result.data()),
-	// //        reinterpret_cast<DES_cblock*>(out.data()), &ks1,
-	// //        &ks2, &ks1, DES_ENCRYPT);
-	// // cout << "\n";
-	// // for (auto a: out)
-	// //   cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-	// // cout << "\n";
-
-	// // DES_ede3_cbc_encrypt(result.data(),
-	// //        out.data(), DES_CBLOCK_LEN, &ks1,
-	// //        &ks2, &ks1, reinterpret_cast<DES_cblock*>(iv.data()),
-	// //        DES_ENCRYPT);
-	// // cout << "\n";
-	// // for (auto a: out)
-	// //   cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-	// // DES_cbc_encrypt((result.data()),
-	// //        out.data(), DES_CBLOCK_LEN, &ks1, reinterpret_cast<DES_cblock*>(iv.data()),
-	// //        DES_ENCRYPT);
-	// // cout << "\n";
-	// // for (auto a: out)
-	// //   cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-	// // DES_ecb_encrypt(reinterpret_cast<DES_cblock*>(out.data()),
-	// //        reinterpret_cast<DES_cblock*>(out.data()), &ks2,
-	// //        DES_ENCRYPT);
-
-	// // DES_ecb_encrypt(reinterpret_cast<DES_cblock*>(out.data()),
-	// //        reinterpret_cast<DES_cblock*>(out.data()), &ks1,
-	// //        DES_ENCRYPT);
-	// // cout << "\n";
-	// // for (auto a: out)
-	// //   cout << hex << std::setfill('0') << std::setw(2) << (int)a;
-
-
-
-	// // cout << "\n";
-	// // for (auto a: enc)
-	// //   cout << hex << std::setfill('0') << std::setw(2) << (int)a;
 
 	return 0;
-
 }

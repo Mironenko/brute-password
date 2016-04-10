@@ -1,9 +1,14 @@
 #include <openssl/md5.h>
 #include <openssl/sha.h>
 #include <openssl/des.h>
+
 #include <array>
+#include <cstdint>
 #include <exception>
+
 #define DES_CBLOCK_LEN 8
+
+using namespace std;
 
 class OpensslException : public std::runtime_error {
 public:
