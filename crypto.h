@@ -1,3 +1,6 @@
+#ifndef BRUTE_CRYPTO_H
+#define BRUTE_CRYPTO_H
+
 #include <openssl/md5.h>
 #include <openssl/sha.h>
 #include <openssl/des.h>
@@ -5,8 +8,9 @@
 #include <array>
 #include <cstdint>
 #include <exception>
+#include <vector>
 
-#define DES_CBLOCK_LEN 8
+#define DES_CBLOCK_LEN sizeof(DES_cblock)
 
 using namespace std;
 
@@ -175,3 +179,5 @@ public:
 		}
 	}
 };
+
+#endif // BRUTE_CRYPTO_H
