@@ -69,16 +69,6 @@ class PasswordBruter : public ThreadWorker {
 	};
 
 	void brute(const vector<uint8_t>& prefix) {
-#ifdef DEBUG
-		{
-			unique_lock<mutex> lock(*mLock);
-			cout << string(prefix.begin(), prefix.end()) << '\n';
-		}
-#endif  // DEBUG
-
-		if (prefix.size() > mMaxLen)
-			return;
-
 		if (prefix.size() >= mMinLen && mVerifier->verify(prefix))
 		{
 			throw Result(prefix);
@@ -89,13 +79,18 @@ class PasswordBruter : public ThreadWorker {
 		for (uint8_t c : mAlphabet)
 		{
 			password[prefix.size()] = c;
-
+#ifdef DEBUG
+			{
+				unique_lock<mutex> lock(*mLock);
+				cout << string(password.begin(), password.end()) << '\n';
+			}
+#endif      // DEBUG
 			if (password.size() >= mMinLen && mVerifier->verify(password))
 			{
 				throw Result(password);
 			}
-
-			brute(password);
+			if (password.size() < mMaxLen)
+				brute(password);
 			if (isStop())
 				return;
 		}
